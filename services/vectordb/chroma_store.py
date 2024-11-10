@@ -8,6 +8,7 @@ import json
 
 from .base import BaseVectorStore, SearchResult, VectorDBConfig
 from ..embedding.base import BaseEmbeddingService
+import traceback
 
 
 class ChromaVectorStore(BaseVectorStore):
@@ -92,6 +93,58 @@ class ChromaVectorStore(BaseVectorStore):
             print(f"Error adding document: {str(e)}")
             return False
 
+    # def search(
+    #     self,
+    #     query: str,
+    #     filter_criteria: Optional[Dict[str, Any]] = None,
+    #     time_range: Optional[Dict[str, datetime]] = None,
+    #     limit: int = 5,
+    #     include_context: bool = True,
+    # ) -> List[SearchResult]:
+    #     try:
+    #         # Build where clause for filtering
+    #         where_clause = self._build_where_clause(filter_criteria, time_range)
+
+    #         # Generate query embedding
+    #         query_embedding = self.embedding_service.generate_single_embedding(query)
+
+    #         # Perform search
+    #         results = self.content_collection.query(
+    #             query_embeddings=[query_embedding], n_results=limit, where=where_clause
+    #         )
+
+    #         # Process results
+    #         search_results = []
+    #         for i, (doc, metadata, distance) in enumerate(
+    #             zip(
+    #                 results["documents"][0],
+    #                 results["metadatas"][0],
+    #                 results["distances"][0],
+    #             )
+    #         ):
+    #             # Get context chunks if required
+    #             context_chunks = None
+    #             if include_context:
+    #                 context_chunks = self._get_context_chunks(
+    #                     chunk_id=results["ids"][0][i], metadata=metadata
+    #                 )
+
+    #             search_results.append(
+    #                 SearchResult(
+    #                     content=doc,
+    #                     metadata=metadata,
+    #                     score=1 - distance,  # Convert distance to similarity score
+    #                     chunk_id=results["ids"][0][i],
+    #                     context_chunks=context_chunks,
+    #                 )
+    #             )
+
+    #         return search_results
+    #     except Exception as e:
+    #         print(f"Error during search: {str(e)}")
+    #         print(traceback.format_exc())
+    #         return []
+
     def search(
         self,
         query: str,
@@ -101,53 +154,84 @@ class ChromaVectorStore(BaseVectorStore):
         include_context: bool = True,
     ) -> List[SearchResult]:
         try:
-            # Build where clause for filtering
-            where_clause = self._build_where_clause(filter_criteria, time_range)
-
             # Generate query embedding
             query_embedding = self.embedding_service.generate_single_embedding(query)
 
+            # Build where clause for filtering
+            where_clause = self._build_where_clause(filter_criteria, time_range)
+
             # Perform search
-            results = self.content_collection.query(
-                query_embeddings=[query_embedding], n_results=limit, where=where_clause
-            )
+            query_params = {"query_embeddings": [query_embedding], "n_results": limit}
+
+            # Only add where clause if there are actual filters
+            if where_clause:
+                query_params["where"] = where_clause
+
+            # print(f"Query params: {query_params['where']}")
+            # Execute search
+            results = self.content_collection.query(**query_params)
+            
 
             # Process results
             search_results = []
-            for i, (doc, metadata, distance) in enumerate(
-                zip(
-                    results["documents"][0],
-                    results["metadatas"][0],
-                    results["distances"][0],
-                )
-            ):
-                # Get context chunks if required
-                context_chunks = None
-                if include_context:
-                    context_chunks = self._get_context_chunks(
-                        chunk_id=results["ids"][0][i], metadata=metadata
+            if results["ids"][0]:  # Check if we have any results
+                for i, (doc, metadata, distance) in enumerate(
+                    zip(
+                        results["documents"][0],
+                        results["metadatas"][0],
+                        results["distances"][0],
                     )
+                ):
+                    # Get context chunks if required
+                    context_chunks = None
+                    if include_context:
+                        context_chunks = self._get_context_chunks(
+                            chunk_id=results["ids"][0][i], metadata=metadata
+                        )
 
-                search_results.append(
-                    SearchResult(
-                        content=doc,
-                        metadata=metadata,
-                        score=1 - distance,  # Convert distance to similarity score
-                        chunk_id=results["ids"][0][i],
-                        context_chunks=context_chunks,
+                    search_results.append(
+                        SearchResult(
+                            content=doc,
+                            metadata=metadata,
+                            score=1 - distance,  # Convert distance to similarity score
+                            chunk_id=results["ids"][0][i],
+                            context_chunks=context_chunks,
+                        )
                     )
-                )
 
             return search_results
         except Exception as e:
             print(f"Error during search: {str(e)}")
+            print(traceback.format_exc())
             return []
+
+    # def _build_where_clause(
+    #     self,
+    #     filter_criteria: Optional[Dict[str, Any]],
+    #     time_range: Optional[Dict[str, datetime]],
+    # ) -> Dict[str, Any]:
+    #     where_clause = {}
+
+    #     if filter_criteria:
+    #         where_clause.update(filter_criteria)
+
+    #     if time_range:
+    #         where_clause.update(
+    #             {
+    #                 "processing_timestamp": {
+    #                     "$gte": time_range.get("start").isoformat(),
+    #                     "$lte": time_range.get("end").isoformat(),
+    #                 }
+    #             }
+    #         )
+
+    #     return where_clause
 
     def _build_where_clause(
         self,
         filter_criteria: Optional[Dict[str, Any]],
         time_range: Optional[Dict[str, datetime]],
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         where_clause = {}
 
         if filter_criteria:
@@ -163,7 +247,8 @@ class ChromaVectorStore(BaseVectorStore):
                 }
             )
 
-        return where_clause
+        # Return None if no filters are applied
+        return where_clause if where_clause else None
 
     def _get_context_chunks(
         self, chunk_id: str, metadata: Dict[str, Any]

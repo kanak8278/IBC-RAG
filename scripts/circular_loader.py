@@ -1,12 +1,11 @@
-# main.py
-import json
 import os
 import sys
 from pathlib import Path
 from typing import List, Dict, Any
 import logging
-from tqdm import tqdm
 from dotenv import load_dotenv
+from tqdm import tqdm
+import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,25 +18,6 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-
-def load_config() -> VectorDBConfig:
-    """Load configuration from environment variables"""
-    load_dotenv()
-
-    azure_config = AzureConfig(
-        api_key=os.getenv("AZURE_API_KEY"),
-        api_base=os.getenv("AZURE_API_BASE"),
-        api_version=os.getenv("AZURE_API_VERSION"),
-        embedding_deployment=os.getenv("AZURE_EMBEDDING_DEPLOYMENT"),
-    )
-
-    chroma_config = ChromaConfig(
-        persist_directory=os.path.join("storage", "circular_vectordb"),
-        collection_name="circulars",
-    )
-
-    return VectorDBConfig(azure=azure_config, chroma=chroma_config)
 
 
 class CircularLoader:
@@ -127,29 +107,7 @@ class CircularLoader:
             logger.error(f"Error in circular loading process: {str(e)}")
 
 
-def test_search(vector_store: CircularVectorStore):
-    """Test search functionality"""
-    logger.info("Testing search functionality")
-
-    test_queries = [
-        "liquidation process",
-        "insolvency professional duties",
-    ]
-
-    for query in test_queries:
-        logger.info(f"\nSearching for: '{query}'")
-        results = vector_store.search_circulars(query=query, limit=10)
-
-        logger.info(f"Results for '{query}':")
-        for i, result in enumerate(results, 1):
-            logger.info(f"\nResult {i}:")
-            logger.info(f"Circular: {result.metadata.get('circular_number')}")
-            logger.info(f"Date: {result.metadata.get('date')}")
-            logger.info(f"Content: {result.content[:200]}...")
-            logger.info(f"Score: {result.score:.4f}")
-
-
-def main():
+def circular_loader():
     # Load configuration
     config = load_config()
 
@@ -165,9 +123,143 @@ def main():
     loader = CircularLoader(data_dir, config)
     loader.run()
 
-    # Test search functionality
-    test_search(loader.vector_store)
+
+def load_config() -> VectorDBConfig:
+    """Load configuration from environment variables"""
+    load_dotenv()
+
+    azure_config = AzureConfig(
+        api_key=os.getenv("AZURE_API_KEY"),
+        api_base=os.getenv("AZURE_API_BASE"),
+        api_version=os.getenv("AZURE_API_VERSION"),
+        embedding_deployment=os.getenv("AZURE_EMBEDDING_DEPLOYMENT"),
+    )
+
+    chroma_config = ChromaConfig(
+        persist_directory=os.path.join("storage", "circular_vectordb"),
+        collection_name="circulars",
+    )
+
+    return VectorDBConfig(azure=azure_config, chroma=chroma_config)
+
+
+class CircularSearcher:
+    def __init__(self, config: VectorDBConfig):
+        self.config = config
+        self.embedding_service = AzureEmbeddingService(self.config.azure)
+        self.vector_store = CircularVectorStore(
+            self.config.chroma, self.embedding_service
+        )
+        stats = self.vector_store.get_stats()
+        logger.info(f"Database Stats:")
+        logger.info(f"Total documents: {stats['total_documents']}")
+        logger.info(f"Collections: {stats['collections']}")
+
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        chunk_types: List[str] = None,
+        date_range: Dict[str, str] = None,
+        filter_criteria: Dict[str, Any] = None,
+    ):
+        """
+        Search for circulars with various filters
+        """
+        logger.info(f"Searching for: '{query}'")
+
+        results = self.vector_store.search_circulars(
+            query=query,
+            limit=limit,
+            chunk_types=chunk_types,
+            date_range=date_range,
+            filter_criteria=filter_criteria,
+        )
+
+        return results
+
+    def display_results(self, results: List[Any], detailed: bool = False):
+        """Display search results"""
+        if not results:
+            logger.info("No results found")
+            return
+
+        for i, result in enumerate(results, 1):
+            logger.info(f"\nResult {i}:")
+            logger.info(f"Circular: {result.metadata.get('circular_number')}")
+            logger.info(f"Date: {result.metadata.get('date')}")
+            logger.info(f"Type: {result.metadata.get('chunk_type')}")
+            logger.info(f"Score: {result.score:.4f}")
+
+            if detailed:
+                logger.info(f"Subject: {result.metadata.get('subject')}")
+                logger.info(f"Content: {result.content}")
+                logger.info(f"References:")
+                logger.info(f"  Sections: {result.metadata.get('section_references')}")
+                logger.info(
+                    f"  Circulars: {result.metadata.get('circular_references')}"
+                )
+                logger.info(
+                    f"  Regulations: {result.metadata.get('regulation_references')}"
+                )
+            else:
+                logger.info(f"Content: {result.content[:200]}...")
+
+    def get_circular_details(self, circular_number: str):
+        """Get all chunks of a specific circular"""
+        logger.info(f"Fetching details for circular: {circular_number}")
+
+        results = self.vector_store.get_circular_by_number(circular_number)
+        if not results:
+            logger.info(f"No circular found with number: {circular_number}")
+            return None
+
+        return results
+
+
+def search_circulars():
+    # Load configuration
+    config = load_config()
+
+    # Initialize searcher
+    searcher = CircularSearcher(config)
+
+    # Example searches
+    search_examples = [
+        {
+            "query": "liquidation process",
+            "filters": {
+                # "chunk_types": ["DIRECTIVE"],
+                # "date_range": {"start": "2023-01-01", "end": "2024-12-31"},
+            },
+        },
+        {
+            "query": "insolvency professional duties registration",
+            "filters": {
+                # "chunk_types": ["DIRECTIVE", "CONTEXT"]
+            },
+        },
+    ]
+
+    # Perform searches
+    for example in search_examples:
+        logger.info(f"\n{'='*50}")
+        logger.info(f"Searching: {example['query']}")
+        results = searcher.search(
+            query=example["query"], limit=5, **example.get("filters", {})
+        )
+        searcher.display_results(results)
+
+    # # Example: Get specific circular details
+    # circular_number = "IBBI/LIQ/78/2024"
+    # logger.info(f"\n{'='*50}")
+    # logger.info(f"Getting details for circular: {circular_number}")
+    # circular_details = searcher.get_circular_details(circular_number)
+    # if circular_details:
+    #     for chunk in circular_details:
+    #         logger.info(f"\nChunk Type: {chunk['chunk_type']}")
+    #         logger.info(f"Content: {chunk['content'][:200]}...")
 
 
 if __name__ == "__main__":
-    main()
+    search_circulars()
