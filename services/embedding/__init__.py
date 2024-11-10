@@ -1,0 +1,1 @@
+from .azure_embedder import AzureEmbeddingService
