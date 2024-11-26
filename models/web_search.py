@@ -8,6 +8,13 @@ import time
 import logging
 from datetime import datetime
 from markdownify import markdownify as md
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import hashlib
+from functools import partial
+import queue
+import threading
 
 
 class GoogleCustomSearchDownloader:
@@ -36,6 +43,32 @@ class GoogleCustomSearchDownloader:
         if not os.path.exists(output_directory):
             os.makedirs(output_directory)
             self.logger.info(f"Created output directory: {output_directory}")
+
+        # Modified retry strategy to exclude DNS errors
+        self.session = requests.Session()
+        retries = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET", "HEAD"],  # Specify allowed methods
+            raise_on_status=False,  # Don't raise exceptions on status
+            # Don't retry on connection or DNS errors
+            connect=0,
+            raise_on_redirect=False,
+        )
+
+        # Use custom transport adapter with longer timeouts
+        adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+        # Add download queue and results cache
+        self.download_queue = queue.Queue()
+        self.results_cache = {}
+
+        # Configure thread and process pools
+        self.max_workers = min(32, os.cpu_count() * 4)  # Adjust based on your needs
+        self.download_semaphore = threading.Semaphore(10)  # Limit concurrent downloads
 
     def _setup_logging(self):
         """Setup logging configuration"""
@@ -153,93 +186,131 @@ class GoogleCustomSearchDownloader:
             self.logger.error(f"Error during search: {str(e)}")
             return []
 
+    def _download_worker(self, url: str, file_type: str = None) -> Tuple[str, str, str]:
+        """Worker function for downloading content"""
+        with self.download_semaphore:
+            filename, content = self.download_content(url, file_type)
+            return url, filename, content
+
+    def search_and_download(
+        self, query: str, num_results: int = 10, **kwargs
+    ) -> List[str]:
+        """Optimized search and download with parallel processing and better error handling"""
+        self.logger.info(f"Starting parallel search and download for query: '{query}'")
+
+        results = self.search_google(query=query, num_results=num_results, **kwargs)
+        if not results:
+            return []
+
+        downloaded_files = []
+        urls_to_download = [result["link"] for result in results]
+
+        # Use a smaller thread pool to avoid overwhelming connections
+        max_concurrent = min(5, self.max_workers)
+
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            future_to_url = {
+                executor.submit(
+                    self._download_worker, url, kwargs.get("file_type")
+                ): url
+                for url in urls_to_download
+            }
+
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    result = future.result(timeout=10)
+                    if result:
+                        url, filename, content = result
+                        if filename and content:
+                            # Save content immediately after download
+                            if self.save_content(filename, content):
+                                downloaded_files.append(
+                                    os.path.join(self.output_directory, filename)
+                                )
+                except TimeoutError:
+                    self.logger.warning(f"Download worker timeout for {url}")
+                    continue
+                except Exception as e:
+                    self.logger.error(f"Error in download worker for {url}: {str(e)}")
+                    continue
+
+        return downloaded_files
+
     def download_content(self, url: str, file_type: str = None) -> Tuple[str, str]:
-        """
-        Download content from a URL and convert HTML to Markdown when applicable
-
-        Args:
-            url (str): URL to download content from
-            file_type (str): Type of file to download (pdf, doc, etc.)
-
-        Returns:
-            Tuple[str, str]: Tuple containing filename and content
-        """
-        self.logger.info(f"Attempting to download content from: {url}")
+        """Optimized content download with caching and better error handling"""
+        # Check cache first
+        cache_key = hashlib.md5(url.encode()).hexdigest()
+        if cache_key in self.results_cache:
+            return self.results_cache[cache_key]
 
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
 
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
+            response = self.session.get(url, headers=headers, timeout=5)
+
+            if response.status_code >= 400:
+                self.logger.warning(f"HTTP {response.status_code} error for {url}")
+                return None, None
 
             content_type = response.headers.get("content-type", "")
             self.logger.debug(f"Content-Type: {content_type}")
 
             # Handle different content types
             if "application/pdf" in content_type:
-                # Save as PDF
                 filename = urllib.parse.quote_plus(url) + ".pdf"
+                content = response.content
                 self.logger.info(f"Downloaded PDF content: {filename}")
-                return filename, response.content
             elif "text/html" in content_type:
-                # Parse HTML content with BeautifulSoup
+                # Process HTML content immediately
                 soup = BeautifulSoup(response.content, "html.parser")
-
-                # Remove unwanted elements
                 for element in soup.find_all(
                     ["script", "style", "nav", "footer", "header", "aside"]
                 ):
                     element.decompose()
 
-                # Convert to markdown while preserving structure
-                markdown_content = md(
+                content = md(
                     str(soup),
                     heading_style="ATX",
-                    # strip=["script", "style", "nav", "footer", "header", "aside"],
                     convert=[
-                        "p",
-                        "h1",
-                        "h2",
-                        "h3",
-                        "h4",
-                        "h5",
-                        "h6",
-                        "li",
-                        "ul",
-                        "ol",
-                        "a",
-                        "b",
-                        "strong",
-                        "i",
-                        "em",
-                        "table",
-                        "tr",
-                        "td",
-                        "th",
-                        "blockquote",
-                        "pre",
-                        "code",
+                        "p", "h1", "h2", "h3", "h4", "h5", "h6",
+                        "li", "ul", "ol", "a", "b", "strong",
+                        "i", "em", "table", "tr", "td", "th",
+                        "blockquote", "pre", "code",
                     ],
-                    bullets="-",  # Use - for unordered lists
-                )
-                # strip the spaces from content
-                markdown_content = markdown_content.strip()
-                filename = (
-                    urllib.parse.quote_plus(url) + ".md"
-                )  # Changed extension to .md
-                self.logger.info(
-                    f"Downloaded and converted HTML content to Markdown: {filename}"
-                )
-                return filename, markdown_content
+                    bullets="-",
+                ).strip()
+                
+                filename = urllib.parse.quote_plus(url) + ".md"
+                self.logger.info(f"Downloaded and converted HTML content to Markdown: {filename}")
             else:
                 # Save as binary content
-                extension = content_type.split("/")[-1]
+                extension = content_type.split("/")[-1].split(";")[0]
+                if not extension or len(extension) > 5:
+                    extension = "bin"
                 filename = urllib.parse.quote_plus(url) + f".{extension}"
+                content = response.content
                 self.logger.info(f"Downloaded binary content: {filename}")
-                return filename, response.content
 
+            # Store result in cache before returning
+            result = (filename, content)
+            self.results_cache[cache_key] = result
+            return result
+
+        except requests.exceptions.ConnectTimeout:
+            self.logger.warning(f"Connection timeout for {url}")
+            return None, None
+        except requests.exceptions.ReadTimeout:
+            self.logger.warning(f"Read timeout for {url}")
+            return None, None
+        except requests.exceptions.ConnectionError as e:
+            if "NameResolutionError" in str(e):
+                self.logger.warning(f"DNS resolution failed for {url}")
+            else:
+                self.logger.warning(f"Connection error for {url}: {str(e)}")
+            return None, None
         except Exception as e:
             self.logger.error(f"Error downloading {url}: {str(e)}")
             return None, None
@@ -271,141 +342,3 @@ class GoogleCustomSearchDownloader:
         except Exception as e:
             self.logger.error(f"Error saving file {filename}: {str(e)}")
             return False
-
-    def search_and_download(
-        self,
-        query: str,
-        num_results: int = 10,
-        file_type: str = None,
-        date_restrict: str = None,
-        site: str = None,
-        sort: str = None,
-        language: str = None,
-    ) -> List[str]:
-        """
-        Search Google and download content from results with advanced filters
-
-        Args:
-            query (str): Search query
-            num_results (int): Number of results to process
-            file_type (str): Specific file type to search for
-            date_restrict (str): Date restriction (e.g., 'd[number]' for days)
-            site (str): Limit search to specific site or domain
-            sort (str): Sort order ('date' for sorting by date)
-            language (str): Language restriction (e.g., 'lang_en' for English)
-
-        Returns:
-            List[str]: List of downloaded file paths
-        """
-        self.logger.info(f"Starting search and download process for query: '{query}'")
-        downloaded_files = []
-
-        # List of preferred legal websites
-        preferred_domains = [
-            "scconline.com",
-            "manupatra.com",
-            "cyrilamarchandblogs.com",
-            "indiacorplaw.in",
-            "mondaq.com",
-            "livelaw.in",
-            "lexology.com",
-            "scobserver.in",
-            "barandbench.com",
-            "theleaflet.in",
-            "nishithdesai.com",
-            "indconlawphil.wordpress.com",
-            "indiankanoon.org",
-            "ibbi.gov.in",
-            "ibclaw.in",
-            "ibclawreporter.in",
-        ]
-
-        # List of excluded domains
-        excluded_domains = [
-            "wikipedia.org",
-            "blog.ipleaders.in",
-            "quora.com",
-            "linkedin.com",
-        ]
-
-        while len(downloaded_files) < num_results:
-            current_batch = max(num_results - len(downloaded_files), 10) * 3
-            results = self.search_google(
-                query=query,
-                num_results=current_batch,
-                date_restrict=date_restrict,
-                file_type=file_type,
-                site=site,
-                sort=sort,
-                language=language,
-            )
-
-            if not results:
-                self.logger.warning("No more results available")
-                break
-
-            self.logger.info(f"Retrieved {len(results)} search results")
-
-            # Filter and sort results
-            filtered_results = []
-            preferred_results = []
-            other_results = []
-
-            for result in results:
-                url = result["link"]
-                domain = urllib.parse.urlparse(url).netloc.lower()
-
-                # Skip excluded domains
-                if any(excluded in domain for excluded in excluded_domains):
-                    self.logger.debug(f"Skipping excluded domain: {domain}")
-                    continue
-
-                # Skip already processed URLs
-                if any(url in file for file in downloaded_files):
-                    continue
-
-                # Categorize results
-                if any(preferred in domain for preferred in preferred_domains):
-                    preferred_results.append(result)
-                else:
-                    other_results.append(result)
-
-            # First try preferred results
-            filtered_results = preferred_results
-
-            # If we don't have enough preferred results, add other results
-            if len(filtered_results) < num_results:
-                self.logger.info(
-                    "Not enough preferred domain results, including other non-excluded domains"
-                )
-                filtered_results.extend(other_results)
-
-            self.logger.info(f"Processing {len(filtered_results)} filtered results")
-            self.logger.info(
-                f"Found {len(preferred_results)} results from preferred domains and {len(other_results)} from other domains"
-            )
-
-            # Download content from filtered results
-            for result in filtered_results:
-                if len(downloaded_files) >= num_results:
-                    break
-
-                url = result["link"]
-                domain = urllib.parse.urlparse(url).netloc
-                self.logger.info(f"Processing content from: {domain}")
-
-                filename, content = self.download_content(url, file_type)
-
-                if filename and content:
-                    if self.save_content(filename, content):
-                        downloaded_files.append(
-                            os.path.join(self.output_directory, filename)
-                        )
-                        print(f"Successfully downloaded and saved content from {url}")
-
-                time.sleep(1)  # Delay between downloads
-
-        self.logger.info(
-            f"Download process completed. Downloaded {len(downloaded_files)} files"
-        )
-        return downloaded_files

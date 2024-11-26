@@ -8,6 +8,7 @@ import json
 sys.path.append(".")
 from llm_model import LLMConfig, LLMProvider, AnthropicLLM, Agent
 from models.web_search import GoogleCustomSearchDownloader
+from utils.logging_utils import ResearchLogger
 
 CONFIGS = {
     "default": LLMConfig(
@@ -30,8 +31,63 @@ def extract_query(text: str):
     ]
 
 
-def main():
-    base_query = "Sarfesci vs IBC act"
+def extract_summary_and_relevance(text: str):
+    # Extract summary
+    summary_match = re.search(r"<summary>(.*?)</summary>", text, re.DOTALL)
+    if not summary_match:
+        return "", False
+
+    summary = summary_match.group(1).strip()
+
+    # Check if explicitly marked as not relevant
+    if summary.lower() == "not relevant":
+        return summary, False
+
+    return summary, True
+
+
+async def process_documents(
+    file_contents, summary_agent, relevance_analysis_prompt, base_query, kwargs, logger
+):
+    relevant_contents = []
+    for file_content in file_contents:
+        current_relevance_prompt = relevance_analysis_prompt
+        current_relevance_prompt = current_relevance_prompt.replace(
+            "{{DOCUMENT}}", file_content
+        )
+        current_relevance_prompt = current_relevance_prompt.replace(
+            "{{QUERY}}", base_query
+        )
+        try:
+            response = await summary_agent.generate(current_relevance_prompt, **kwargs)
+            summary, is_relevant = extract_summary_and_relevance(response["content"])
+
+            # Log the summary
+            logger.log_document_summary(
+                "document_content",  # You might want to pass the actual filename here
+                summary,
+                is_relevant,
+            )
+
+            if is_relevant:
+                relevant_contents.append(summary)
+                logger.log_relevant_content(summary)
+        except Exception as e:
+            logger.logger.error(f"Error processing document: {str(e)}")
+    return relevant_contents
+
+
+async def main():
+    # Add command line argument parsing
+    if len(sys.argv) > 1:
+        base_query = " ".join(sys.argv[1:])
+    else:
+        base_query = "Sarfesci vs IBC act"
+
+    # Initialize logger at the start
+    logger = ResearchLogger(base_query)
+    logger.logger.info(f"Starting research for query: {base_query}")
+
     # Your Google Cloud API credentials
     load_dotenv()
     API_KEY = os.getenv("GCP_API_KEY")
@@ -42,51 +98,95 @@ def main():
         "add_history": True,
     }
     config = CONFIGS["gemini"]
-    agent = config.create_agent(
+    query_rewriting_agent = config.create_agent(
         "You are an AI assistant specializing in Indian law, tasked with improving and expanding search queries related to Indian legal terms and concepts. Your goal is to transform potentially ill-formed, grammatically incorrect, or misspelled user queries into multiple well-formed, specific search queries that will yield relevant results about Indian law."
     )
+
+    research_note_agent = config.create_agent(
+        "You are a legal research assistant tasked with writing a comprehensive Legal Research Note. You will be provided with legal context from various documents and a specific query to address. Your goal is to synthesize this information into a well-structured, professional research note that adheres to legal writing standards."
+    )
+
+    summary_agent = config.create_agent(
+        "You are a legal research assistant tasked with evaluating the relevance of a legal document to a given search query and extracting pertinent information. Your goal is to determine if the document is relevant to the query and, if so, to extract the main points that are applicable."
+    )
+
     # load prompts/query_rewriting.jinja and replace USER_QUERY with the query
     with open("prompts/query_rewriting.jinja", "r") as file:
-        prompt = file.read()
-    prompt = prompt.replace("{{USER_QUERY}}", base_query)
+        query_rewriting_prompt = file.read()
+    query_rewriting_prompt = query_rewriting_prompt.replace(
+        "{{USER_QUERY}}", base_query
+    )
 
-    response = asyncio.run(
-        agent.generate(
-            prompt,
-            **kwargs,
-        )
+    with open("prompts/research_note.jinja", "r") as file:
+        research_note_prompt = file.read()
+
+    with open("prompts/relevance_analysis.jinja", "r") as file:
+        relevance_analysis_prompt = file.read()
+
+    # Query rewriting
+    response = await query_rewriting_agent.generate(
+        query_rewriting_prompt,
+        **kwargs,
     )
     queries = extract_query(response["content"])
-    print(json.dumps(queries, indent=4))
+    logger.log_expanded_queries(queries)
 
-    # Create downloader instance
-    downloader = GoogleCustomSearchDownloader(
-        api_key=API_KEY,
-        custom_search_engine_id=CUSTOM_SEARCH_ENGINE_ID,
-        output_directory="gcp_search_results",
+    downloaded_files = os.listdir("gcp_search_results")
+    logger.logger.info(f"Found {len(downloaded_files)} files in gcp_search_results")
+
+    file_contents = []
+    # filter out the files .md
+    for file_path in downloaded_files[:8]:
+        full_path = os.path.join("gcp_search_results", file_path)
+        if full_path.endswith(".md"):
+            try:
+                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                    file_contents.append(
+                        (full_path, content)
+                    )  # Store tuple of path and content
+                logger.logger.info(f"Successfully read file: {full_path}")
+            except Exception as e:
+                logger.logger.error(f"Error reading file {full_path}: {str(e)}")
+
+    # Process documents
+    relevant_contents = await process_documents(
+        [content for _, content in file_contents],  # Pass only the content
+        summary_agent,
+        relevance_analysis_prompt,
+        base_query,
+        kwargs,
+        logger,
     )
 
-    # Search query with filters
-    for query in queries:
-        print(f"Searching for: {query}")
-        print(f"Fetching results from preferred legal websites...")
+    if not relevant_contents:
+        logger.logger.warning("No relevant content found in the downloaded documents.")
+        logger.save_final_report()
+        return
 
-        # Perform search and download with filters
-        downloaded_files = downloader.search_and_download(
-            query=query,
-            num_results=10,
-            file_type=None,  # Search for PDFs only
-            # search only for websites from india
-            # site_restrict="site_in",
-            date_restrict="y1",  # Results from the last year
-            # sort="date",  # Sort by date
-            language="lang_en",  # English language results only
+    # Generate research note
+    try:
+        research_note_prompt_final = research_note_prompt.replace(
+            "{{LEGAL_CONTEXT}}", "\n\n".join(relevant_contents)
+        )
+        research_note_prompt_final = research_note_prompt_final.replace(
+            "{{QUERY}}", queries[1] if queries else base_query
         )
 
-        print("\nDownloaded files:")
-        for file in downloaded_files:
-            print(f"- {file}")
+        response = await research_note_agent.generate(
+            research_note_prompt_final, **kwargs
+        )
+        logger.log_research_note(response["content"])
+        logger.logger.info("Successfully generated research note")
+
+        # Save all data at the end
+        logger.save_final_report()
+        logger.logger.info("Research session completed successfully")
+
+    except Exception as e:
+        logger.logger.error(f"Error generating research note: {str(e)}")
+        logger.save_final_report()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
