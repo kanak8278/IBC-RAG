@@ -149,9 +149,10 @@ async def main():
             except Exception as e:
                 logger.logger.error(f"Error reading file {full_path}: {str(e)}")
 
+    content_to_process = [content for _, content in file_contents]
     # Process documents
     relevant_contents = await process_documents(
-        [content for _, content in file_contents],  # Pass only the content
+        content_to_process,  # Pass only the content
         summary_agent,
         relevance_analysis_prompt,
         base_query,

@@ -377,8 +377,8 @@ def retrieve_content(query):
 
 
 if __name__ == "__main__":
-    act_file = "data/ibbi_raw/IBC ACT-2021-indiacode.md"
-    vectorize_act(act_file)
+    # act_file = "data/ibbi_raw/IBC ACT-2021-indiacode.md"
+    # vectorize_act(act_file)
 
     while True:
         query = input("Enter a query: ")

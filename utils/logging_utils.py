@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime
 import logging
+from typing import List
 
 
 class ResearchLogger:
@@ -18,20 +19,21 @@ class ResearchLogger:
         # Set up logging
         self.logger = logging.getLogger(f"research_{timestamp}")
         self.logger.setLevel(logging.INFO)
+        # Check if logger already has handlers to avoid duplicate logging
+        if not self.logger.handlers:
+            # File handler
+            log_file = os.path.join(self.session_dir, "research.log")
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
 
-        # File handler
-        log_file = os.path.join(self.session_dir, "research.log")
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.INFO)
-        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        file_handler.setFormatter(formatter)
-        self.logger.addHandler(file_handler)
-
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(formatter)
-        self.logger.addHandler(console_handler)
+            # Console handler
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_handler.setFormatter(formatter)
+            self.logger.addHandler(console_handler)
 
         self.research_data = {
             "base_query": base_query,
@@ -79,3 +81,17 @@ class ResearchLogger:
 
     def save_final_report(self):
         self._save_json("complete_research_data.json", self.research_data)
+
+    def log_act_search_results(self, act_results: List[dict]):
+        """Log the results from the Act hybrid search."""
+        self.research_data["act_search_results"] = []
+        for result in act_results:
+            result_entry = {
+                "section": result.get("section", "N/A"),
+                "score": result.get("score", "N/A"),
+                "content_preview": result.get("content", "")[:200]
+                + "...",  # First 200 chars
+            }
+            self.research_data["act_search_results"].append(result_entry)
+
+        self.logger.info(f"Logged {len(act_results)} Act search results")

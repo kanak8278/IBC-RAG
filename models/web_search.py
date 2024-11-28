@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import os
 import urllib.parse
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import time
 import logging
 from datetime import datetime
@@ -23,6 +23,8 @@ class GoogleCustomSearchDownloader:
         api_key: str,
         custom_search_engine_id: str,
         output_directory: str = "downloaded_content",
+        websites_only: bool = False,
+        logger: Optional[logging.Logger] = None,
     ):
         """
         Initialize the Google Custom Search Downloader
@@ -31,14 +33,20 @@ class GoogleCustomSearchDownloader:
             api_key (str): Google Cloud API Key
             custom_search_engine_id (str): Custom Search Engine ID
             output_directory (str): Directory to save downloaded content
+            websites_only (bool): If True, only download HTML websites, ignore PDFs and other files
+            logger (Optional[logging.Logger]): External logger instance to use
         """
         self.api_key = api_key
         self.custom_search_engine_id = custom_search_engine_id
         self.output_directory = output_directory
+        self.websites_only = websites_only
         self.service = build("customsearch", "v1", developerKey=api_key)
 
-        # Setup logging
-        self._setup_logging()
+        # Use provided logger or create a new one
+        if logger:
+            self.logger = logger
+        else:
+            self.logger = self._setup_logging()
 
         if not os.path.exists(output_directory):
             os.makedirs(output_directory)
@@ -70,8 +78,8 @@ class GoogleCustomSearchDownloader:
         self.max_workers = min(32, os.cpu_count() * 4)  # Adjust based on your needs
         self.download_semaphore = threading.Semaphore(10)  # Limit concurrent downloads
 
-    def _setup_logging(self):
-        """Setup logging configuration"""
+    def _setup_logging(self) -> logging.Logger:
+        """Setup logging configuration - only used if no logger is provided"""
         # Create logs directory if it doesn't exist
         if not os.path.exists("logs"):
             os.makedirs("logs")
@@ -81,27 +89,29 @@ class GoogleCustomSearchDownloader:
         log_file = f"logs/search_log_{timestamp}.log"
 
         # Configure logging
-        self.logger = logging.getLogger("GoogleCustomSearch")
-        self.logger.setLevel(logging.INFO)
+        logger = logging.getLogger("GoogleCustomSearch")
+        logger.setLevel(logging.INFO)
 
-        # Create file handler
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.INFO)
+        # Only add handlers if they don't exist
+        if not logger.handlers:
+            # Create file handler
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(logging.INFO)
 
-        # Create console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
+            # Create console handler
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
 
-        # Create formatter
-        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
+            # Create formatter
+            formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            file_handler.setFormatter(formatter)
+            console_handler.setFormatter(formatter)
 
-        # Add handlers to logger
-        self.logger.addHandler(file_handler)
-        self.logger.addHandler(console_handler)
+            # Add handlers to logger
+            logger.addHandler(file_handler)
+            logger.addHandler(console_handler)
 
-        self.logger.info("Logging initialized")
+        return logger
 
     def search_google(
         self,
@@ -258,8 +268,13 @@ class GoogleCustomSearchDownloader:
             content_type = response.headers.get("content-type", "")
             self.logger.debug(f"Content-Type: {content_type}")
 
+            # If websites_only is True, skip non-HTML content
+            if self.websites_only and "text/html" not in content_type:
+                self.logger.info(f"Skipping non-HTML content: {url}")
+                return None, None
+
             # Handle different content types
-            if "application/pdf" in content_type:
+            if "application/pdf" in content_type and not self.websites_only:
                 filename = urllib.parse.quote_plus(url) + ".pdf"
                 content = response.content
                 self.logger.info(f"Downloaded PDF content: {filename}")
@@ -305,14 +320,17 @@ class GoogleCustomSearchDownloader:
                 self.logger.info(
                     f"Downloaded and converted HTML content to Markdown: {filename}"
                 )
-            else:
-                # Save as binary content
+            elif not self.websites_only:
+                # Save as binary content only if websites_only is False
                 extension = content_type.split("/")[-1].split(";")[0]
                 if not extension or len(extension) > 5:
                     extension = "bin"
                 filename = urllib.parse.quote_plus(url) + f".{extension}"
                 content = response.content
                 self.logger.info(f"Downloaded binary content: {filename}")
+            else:
+                # Skip non-HTML content when websites_only is True
+                return None, None
 
             # Store result in cache before returning
             result = (filename, content)
