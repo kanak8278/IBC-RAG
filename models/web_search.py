@@ -275,16 +275,36 @@ class GoogleCustomSearchDownloader:
                     str(soup),
                     heading_style="ATX",
                     convert=[
-                        "p", "h1", "h2", "h3", "h4", "h5", "h6",
-                        "li", "ul", "ol", "a", "b", "strong",
-                        "i", "em", "table", "tr", "td", "th",
-                        "blockquote", "pre", "code",
+                        "p",
+                        "h1",
+                        "h2",
+                        "h3",
+                        "h4",
+                        "h5",
+                        "h6",
+                        "li",
+                        "ul",
+                        "ol",
+                        "a",
+                        "b",
+                        "strong",
+                        "i",
+                        "em",
+                        "table",
+                        "tr",
+                        "td",
+                        "th",
+                        "blockquote",
+                        "pre",
+                        "code",
                     ],
                     bullets="-",
                 ).strip()
-                
+
                 filename = urllib.parse.quote_plus(url) + ".md"
-                self.logger.info(f"Downloaded and converted HTML content to Markdown: {filename}")
+                self.logger.info(
+                    f"Downloaded and converted HTML content to Markdown: {filename}"
+                )
             else:
                 # Save as binary content
                 extension = content_type.split("/")[-1].split(";")[0]

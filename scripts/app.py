@@ -3,6 +3,7 @@ import asyncio
 import os
 from dotenv import load_dotenv
 import sys
+import re
 
 sys.path.append(".")
 from scripts.search import (
@@ -67,6 +68,9 @@ async def run_research(query: str, progress_bar, status_text):
     queries = extract_query(response["content"])
     logger.log_expanded_queries(queries)
     folder = queries[0]
+    # make sure the folder name is valid for a file path
+    folder = re.sub(r"[^a-zA-Z0-9_]", "_", folder)
+
     # Web search and download
     progress_bar.progress(30)
     status_text.text("Performing web search...")

@@ -1,0 +1,32 @@
+Here is the legal document you will be analyzing:
+
+<legal_document>
+{{LEGAL_DOCUMENT}}
+</legal_document>
+
+Please follow these steps to extract the required metadata and context:
+
+1. Carefully read through the entire document.
+
+2. Extract the following metadata:
+   a) Unique Document Number: Find unique identifier such as a circular number, reference number, or regulation code which will denote the document uniquely.
+   b) Title: Extract the explicit title if present. If no title is present, generate a title based on the document's content. Also add one more sentence to the title to make it more descriptive.
+
+3. Write a context summary sentences that captures the document's primary purpose, key topics addressed, and any significant clarifications or instructions provided. Mention all the relevant 
+
+4. Format your findings using the following XML structure:
+
+<output>
+  <metadata>
+    <document_id>[extracted identifier or "Not specified" if absent]</document_id>
+    <title>[extracted or generated title]</title>
+  </metadata>
+  
+  <context_summary>
+    [Summary of the document's context]
+  </context_summary>
+</output>
+
+If any required information is not explicitly stated in the document, state "Not specified" for that option.
+
+After completing your analysis, provide the final output using the XML structure specified above.
